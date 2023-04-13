@@ -37,28 +37,39 @@ class I2CBusDriver(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        scl_r = Signal(reset=1)
-        sda_r = Signal(reset=1)
-
+        # SDA line must be bidirectional...
         m.d.comb += [
-            # Only drive SDA/SCL when =0 (pull-up by default)
-            self.scl_t.o  .eq(0),
-            self.scl_t.oe .eq(~self.scl_o),
             self.sda_t.o  .eq(0),
             self.sda_t.oe .eq(~self.sda_o),
-
-            self.sample .eq(~scl_r & self.scl_i),  # SCL rising edge
-            self.setup  .eq(scl_r & ~self.scl_i),  # SCL falling edge
-            self.start  .eq(self.scl_i & sda_r & ~self.sda_i),  # SDA fall, SCL high
-            self.stop   .eq(self.scl_i & ~sda_r & self.sda_i),  # SDA rise, SCL high
         ]
+        m.submodules += FFSynchronizer(self.sda_t.i, self.sda_i, reset=1)
+
+        # But the SCL line does not need to: only if we want to support clock stretching
+        if hasattr(self.scl_t, "oe"):
+            m.d.comb += [
+                self.scl_t.o  .eq(0),
+                self.scl_t.oe .eq(~self.scl_o),
+            ]
+            m.submodules += FFSynchronizer(self.scl_t.i, self.scl_i, reset=1)
+        else:
+            # SCL output only
+            m.d.comb += [
+                self.scl_t.o  .eq(self.scl_o),
+                self.scl_i    .eq(self.scl_o),
+            ]
+
+        # Additional signals for bus state detection
+        scl_r = Signal(reset=1)
+        sda_r = Signal(reset=1)
         m.d.sync += [
             scl_r.eq(self.scl_i),
             sda_r.eq(self.sda_i),
         ]
-        m.submodules += [
-            FFSynchronizer(self.scl_t.i, self.scl_i, reset=1),
-            FFSynchronizer(self.sda_t.i, self.sda_i, reset=1),
+        m.d.comb += [
+            self.sample .eq(~scl_r & self.scl_i),  # SCL rising edge
+            self.setup  .eq(scl_r & ~self.scl_i),  # SCL falling edge
+            self.start  .eq(self.scl_i & sda_r & ~self.sda_i),  # SDA fall, SCL high
+            self.stop   .eq(self.scl_i & ~sda_r & self.sda_i),  # SDA rise, SCL high
         ]
         
         return m
