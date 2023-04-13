@@ -17,8 +17,9 @@ from luna.gateware.architecture.car   import LunaECP5DomainGenerator
 from luna.gateware.interface.jtag     import JTAGRegisterInterface
 from luna.gateware.interface.ulpi     import ULPIRegisterWindow
 from luna.gateware.interface.psram    import HyperRAMInterface
+from luna.gateware.interface.i2c      import I2CDeviceInterface
 
-from apollo_fpga.support.selftest          import ApolloSelfTestCase, named_test
+from apollo_fpga.support.selftest     import ApolloSelfTestCase, named_test
 
 
 CLOCK_FREQUENCIES = {
@@ -50,6 +51,13 @@ REGISTER_CONTROL_RXCMD = 15
 
 REGISTER_RAM_REG_ADDR   = 20
 REGISTER_RAM_VALUE      = 21
+
+REGISTER_TARGET_TYPEC_CTL_ADDR  = 22
+REGISTER_TARGET_TYPEC_CTL_VALUE = 23
+REGISTER_AUX_TYPEC_CTL_ADDR     = 24
+REGISTER_AUX_TYPEC_CTL_VALUE    = 25
+REGISTER_PWR_MON_ADDR           = 26
+REGISTER_PWR_MON_VALUE          = 27
 
 class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
     """ Hardware meant to demonstrate use of the Debug Controller's register interface.
@@ -134,6 +142,25 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
             psram.address          .eq(psram_address),
         ]
 
+        #
+        # I2C registers interface
+        #
+        self.add_i2c_registers(m, platform,
+            i2c_bus="target_type_c",
+            dev_address=0b0100010,  # FUSB302BMPX slave address
+            register_base=REGISTER_TARGET_TYPEC_CTL_ADDR
+        )
+        self.add_i2c_registers(m, platform,
+            i2c_bus="aux_type_c",
+            dev_address=0b0100010,  # FUSB302BMPX slave address
+            register_base=REGISTER_AUX_TYPEC_CTL_ADDR
+        )
+        self.add_i2c_registers(m, platform,
+            i2c_bus="power_monitor",
+            dev_address=0b0010000,  # PAC195X slave address when ADDRSEL tied to GND
+            register_base=REGISTER_PWR_MON_ADDR
+        )
+
         return m
 
 
@@ -183,6 +210,32 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
             output=ulpi_reg_window.write_request
         )
 
+    def add_i2c_registers(self, m, platform, *, i2c_bus, dev_address, register_base):
+        """ Adds a set of I2C registers to the active design. """
+
+        target_i2c      = platform.request(i2c_bus)
+
+        i2c_if = I2CDeviceInterface(pads=target_i2c, period_cyc=300, address=dev_address)
+        m.submodules  += i2c_if
+
+        register_address_change  = Signal()
+        register_value_change    = Signal()
+
+        # I2C register address.
+        registers = m.submodules.registers
+        registers.add_register(register_base + 0,
+            write_strobe=register_address_change,
+            value_signal=i2c_if.address,
+        )
+        m.d.sync += i2c_if.read_request.eq(register_address_change)
+
+        # I2C register value.
+        registers.add_sfr(register_base + 1,
+            read=i2c_if.read_data,
+            write_signal=i2c_if.write_data,
+            write_strobe=register_value_change
+        )
+        m.d.sync += i2c_if.write_request.eq(register_value_change)
 
     def assertPhyRegister(self, phy_register_base: int, register: int, expected_value: int):
         """ Asserts that a PHY register contains a given value.
@@ -285,7 +338,25 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
     def test_hyperram(self, dut):
         self.assertHyperRAMRegister(0, ALLOWED_HYPERRAM_IDS)
 
+    @named_test("TARGET Type-C controller (I2C)")
+    def test_target_typec_controller(self, dut):
+        self.dut.registers.register_write(REGISTER_TARGET_TYPEC_CTL_ADDR, 0x01)
+        actual_value = self.dut.registers.register_read(REGISTER_TARGET_TYPEC_CTL_VALUE)
+        print(f"Device ID register: {actual_value}")
 
+    @named_test("AUX Type-C controller (I2C)")
+    def test_target_typec_controller(self, dut):
+        self.dut.registers.register_write(REGISTER_AUX_TYPEC_CTL_ADDR, 0x01)
+        actual_value = self.dut.registers.register_read(REGISTER_AUX_TYPEC_CTL_VALUE)
+        print(f"Device ID register: {actual_value}")
+
+    @named_test("Power monitor (I2C)")
+    def test_target_typec_controller(self, dut):
+        self.dut.registers.register_write(REGISTER_PWR_MON_ADDR, 0xFE)
+        actual_value = self.dut.registers.register_read(REGISTER_PWR_MON_VALUE)
+        print(f"Manufacturer ID register: {actual_value}")
+        if actual_value != 0x54:
+            raise AssertionError(f"Power Monitor manufacturer ID register {actual_value} != 0x54")
 
 if __name__ == "__main__":
     tester = top_level_cli(InteractiveSelftest)
