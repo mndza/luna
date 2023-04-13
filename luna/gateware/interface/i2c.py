@@ -14,7 +14,7 @@ from amaranth.hdl.rec import Record, DIR_FANIN, DIR_FANOUT
 
 from ..test         import LunaGatewareTestCase, sync_test_case
 
-from .i2c_ll import I2CInitiator
+from .i2c_ll import I2CBus, I2CInitiator
 
 
 class I2CDeviceInterface(Elaboratable):
