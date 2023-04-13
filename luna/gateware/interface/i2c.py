@@ -35,11 +35,12 @@ class I2CDeviceInterface(Elaboratable):
 
     """
 
-    def __init__(self, pads, period_cyc, address):
+    def __init__(self, pads, period_cyc, address, *, clk_stretch=False):
 
         self.pads          = pads
         self.period_cyc    = period_cyc
         self.dev_address   = address
+        self.clk_stretch   = clk_stretch
 
         # I/O ports
 
@@ -61,7 +62,7 @@ class I2CDeviceInterface(Elaboratable):
         current_write   = Signal.like(self.write_data)
 
         # I2C initiator (low level manager) and default signal values
-        m.submodules.i2c = i2c = I2CInitiator(pads=self.pads, period_cyc=self.period_cyc, clk_stretch=True)
+        m.submodules.i2c = i2c = I2CInitiator(pads=self.pads, period_cyc=self.period_cyc, clk_stretch=self.clk_stretch)
         m.d.comb += [
             i2c.start .eq(0),
             i2c.write .eq(0),
@@ -98,7 +99,14 @@ class I2CDeviceInterface(Elaboratable):
                     m.d.comb += i2c.data_i.eq((self.dev_address << 1) | 0)
                     m.d.comb += i2c.write.eq(1)
                 with m.Elif(i2c.ack_o):
-                    m.next = "WR_SEND_REG_ADDRESS"
+                    m.next = "WR_ACK_DEV_ADDRESS"
+
+            with m.State("WR_ACK_DEV_ADDRESS"):
+                with m.If(~i2c.busy):
+                    with m.If(i2c.ack_o):  # dev address asserted
+                        m.next = "WR_SEND_REG_ADDRESS"
+                    with m.Else():
+                        m.next = "IDLE"
 
             with m.State("WR_SEND_REG_ADDRESS"):
                 with m.If(~i2c.busy):
@@ -134,8 +142,14 @@ class I2CDeviceInterface(Elaboratable):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.data_i.eq((self.dev_address << 1) | 0)
                     m.d.comb += i2c.write.eq(1)
-                with m.Elif(i2c.ack_o):  # dev address asserted
-                    m.next = "RD0_SEND_REG_ADDRESS"
+                    m.next = "RD0_ACK_DEV_ADDRESS"
+
+            with m.State("RD0_ACK_DEV_ADDRESS"):
+                with m.If(~i2c.busy):
+                    with m.If(i2c.ack_o):  # dev address asserted
+                        m.next = "RD0_SEND_REG_ADDRESS"
+                    with m.Else():
+                        m.next = "IDLE"
 
             with m.State("RD0_SEND_REG_ADDRESS"):
                 with m.If(~i2c.busy):
@@ -176,23 +190,26 @@ class I2CDeviceInterface(Elaboratable):
         return m
 
 
-class I2CPads(Record):
-    """ Record representing an I2C bus. """
+class I2CDeviceInterfaceTestbench(I2CDeviceInterface):
+    def __init__(self, pads, period_cyc, address):
+        super().__init__(pads, period_cyc, address)
+        self.scl_o = Signal(reset=1)  # used to override values from testbench
+        self.sda_o = Signal(reset=1)  
 
-    def __init__(self):
-        super().__init__([
-            ('scl', [('i', 1, DIR_FANIN), ('o', 1, DIR_FANOUT), ('oe', 1, DIR_FANOUT)]),
-            ('sda', [('i', 1, DIR_FANIN), ('o', 1, DIR_FANOUT), ('oe', 1, DIR_FANOUT)]),
-        ])
-
+    def elaborate(self, platform):
+        m = super().elaborate(platform)
+        m.d.comb += [
+            self.pads.scl.i.eq((self.pads.scl.o | ~self.pads.scl.oe) & self.scl_o),
+            self.pads.sda.i.eq((self.pads.sda.o | ~self.pads.sda.oe) & self.sda_o),
+        ]
+        return m
 
 class TestI2CDeviceInterface(LunaGatewareTestCase):
-    pads = I2CPads()
-    FRAGMENT_UNDER_TEST = I2CDeviceInterface
+    FRAGMENT_UNDER_TEST = I2CDeviceInterfaceTestbench
     FRAGMENT_ARGUMENTS = {
         "address": 0b1110010,
-        "pads": pads,
-        "period_cyc": 300,  # 400 kHz
+        "pads": I2CBus(),
+        "period_cyc": 4,  # 400 kHz
     }
 
     def initialize_signals(self):
@@ -205,11 +222,16 @@ class TestI2CDeviceInterface(LunaGatewareTestCase):
 
     @sync_test_case
     def test_register_read(self):
-        pass        
 
-    @sync_test_case
-    def test_register_write(self):
-        pass
+        # Set up a read request.
+        yield self.dut.address.eq(0x12)
+        yield from self.pulse(self.dut.read_request)
+
+        # Starting the request should make us busy.
+        self.assertEqual((yield self.dut.busy), 1)
+
+        #yield from self.wait_until(self.dut.done, timeout=1000)
+
 
 if __name__ == "__main__":
     unittest.main()
