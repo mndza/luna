@@ -156,11 +156,6 @@ class I2CDeviceInterface(Elaboratable):
                     m.d.comb += i2c.data_i.eq(current_address)
                     m.d.comb += i2c.write.eq(1)
                 with m.Elif(i2c.ack_o):  # reg address asserted
-                    m.next = "RD0_FINISH"
-
-            with m.State("RD0_FINISH"):
-                with m.If(~i2c.busy):
-                    m.d.comb += i2c.stop.eq(1)
                     m.next = "RD1_START"
 
             with m.State('RD1_START'):
