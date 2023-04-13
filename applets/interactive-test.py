@@ -338,25 +338,26 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
     def test_hyperram(self, dut):
         self.assertHyperRAMRegister(0, ALLOWED_HYPERRAM_IDS)
 
-    @named_test("TARGET Type-C controller (I2C)")
+    @named_test("TARGET Type-C")
     def test_target_typec_controller(self, dut):
         self.dut.registers.register_write(REGISTER_TARGET_TYPEC_CTL_ADDR, 0x01)
         actual_value = self.dut.registers.register_read(REGISTER_TARGET_TYPEC_CTL_VALUE)
-        print(f"Device ID register: {actual_value}")
+        if actual_value & 0b11001100 != 0b10000000:
+            raise AssertionError(f"TARGET Type-C ID device ID register was {bin(actual_value)}, not 0b10xx00xx")
 
-    @named_test("AUX Type-C controller (I2C)")
-    def test_target_typec_controller(self, dut):
+    @named_test("AUX Type-C")
+    def test_aux_typec_controller(self, dut):
         self.dut.registers.register_write(REGISTER_AUX_TYPEC_CTL_ADDR, 0x01)
         actual_value = self.dut.registers.register_read(REGISTER_AUX_TYPEC_CTL_VALUE)
-        print(f"Device ID register: {actual_value}")
+        if actual_value & 0b11001100 != 0b10000000:
+            raise AssertionError(f"TARGET Type-C ID device ID register was {bin(actual_value)}, not 0b10xx00xx")
 
-    @named_test("Power monitor (I2C)")
-    def test_target_typec_controller(self, dut):
+    @named_test("Power monitor")
+    def test_power_monitor_controller(self, dut):
         self.dut.registers.register_write(REGISTER_PWR_MON_ADDR, 0xFE)
         actual_value = self.dut.registers.register_read(REGISTER_PWR_MON_VALUE)
-        print(f"Manufacturer ID register: {actual_value}")
         if actual_value != 0x54:
-            raise AssertionError(f"Power Monitor manufacturer ID register {actual_value} != 0x54")
+            raise AssertionError(f"Power Monitor manufacturer ID register 0x{actual_value:x} != 0x54")
 
 if __name__ == "__main__":
     tester = top_level_cli(InteractiveSelftest)
