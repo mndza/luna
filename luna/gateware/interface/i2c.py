@@ -106,21 +106,33 @@ class I2CDeviceInterface(Elaboratable):
                     with m.If(i2c.ack_o):  # dev address asserted
                         m.next = "WR_SEND_REG_ADDRESS"
                     with m.Else():
-                        m.next = "IDLE"
+                        m.next = "ABORT"
 
             with m.State("WR_SEND_REG_ADDRESS"):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.data_i.eq(current_address)
                     m.d.comb += i2c.write.eq(1)
-                with m.Elif(i2c.ack_o):
-                    m.next = "WR_SEND_VALUE"
+                    m.next = "WR_ACK_REG_ADDRESS"
+
+            with m.State("WR_ACK_REG_ADDRESS"):
+                with m.If(~i2c.busy):
+                    with m.If(i2c.ack_o):  # reg address asserted
+                        m.next = "WR_SEND_VALUE"
+                    with m.Else():
+                        m.next = "ABORT"
 
             with m.State("WR_SEND_VALUE"):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.data_i.eq(current_write)
                     m.d.comb += i2c.write.eq(1)
-                with m.Elif(i2c.ack_o):
-                    m.next = "WR_FINISH"
+                    m.next = "WR_ACK_VALUE"
+            
+            with m.State("WR_ACK_VALUE"):
+                with m.If(~i2c.busy):
+                    with m.If(i2c.ack_o):
+                        m.next = "WR_FINISH"
+                    with m.Else():
+                        m.next = "ABORT"
 
             with m.State("WR_FINISH"):
                 with m.If(~i2c.busy):
@@ -149,15 +161,21 @@ class I2CDeviceInterface(Elaboratable):
                     with m.If(i2c.ack_o):  # dev address asserted
                         m.next = "RD0_SEND_REG_ADDRESS"
                     with m.Else():
-                        m.next = "IDLE"
+                        m.next = "ABORT"
 
             with m.State("RD0_SEND_REG_ADDRESS"):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.data_i.eq(current_address)
                     m.d.comb += i2c.write.eq(1)
-                with m.Elif(i2c.ack_o):  # reg address asserted
-                    m.next = "RD1_START"
+                    m.next = "RD0_ACK_REG_ADDRESS"
 
+            with m.State("RD0_ACK_REG_ADDRESS"):
+                with m.If(~i2c.busy):
+                    with m.If(i2c.ack_o):  # reg address asserted
+                        m.next = "RD1_START"
+                    with m.Else():
+                        m.next = "ABORT"
+            
             with m.State('RD1_START'):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.start.eq(1)
@@ -167,8 +185,14 @@ class I2CDeviceInterface(Elaboratable):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.data_i.eq((self.dev_address << 1) | 1)
                     m.d.comb += i2c.write.eq(1)
-                with m.Elif(i2c.ack_o):  # dev address asserted
-                    m.next = "RD1_RECV_VALUE"
+                    m.next = "RD1_ACK_DEV_ADDRESS"
+
+            with m.State("RD1_ACK_DEV_ADDRESS"):
+                with m.If(~i2c.busy):
+                    with m.If(i2c.ack_o):  # dev address asserted
+                        m.next = "RD1_RECV_VALUE"
+                    with m.Else():
+                        m.next = "ABORT"
 
             with m.State("RD1_RECV_VALUE"):
                 with m.If(~i2c.busy):
@@ -180,6 +204,11 @@ class I2CDeviceInterface(Elaboratable):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.stop.eq(1)
                     m.d.comb += self.done.eq(1)
+                    m.next = "IDLE"
+            
+            with m.State("ABORT"):
+                with m.If(~i2c.busy):
+                    m.d.comb += i2c.stop.eq(1)
                     m.next = "IDLE"
 
         return m
