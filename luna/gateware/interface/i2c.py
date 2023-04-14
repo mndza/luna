@@ -98,7 +98,6 @@ class I2CDeviceInterface(Elaboratable):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.data_i.eq((self.dev_address << 1) | 0)
                     m.d.comb += i2c.write.eq(1)
-                with m.Elif(i2c.ack_o):
                     m.next = "WR_ACK_DEV_ADDRESS"
 
             with m.State("WR_ACK_DEV_ADDRESS"):
