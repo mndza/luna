@@ -35,7 +35,7 @@ class I2CDeviceInterface(Elaboratable):
 
     """
 
-    def __init__(self, pads, period_cyc, address, *, clk_stretch=False):
+    def __init__(self, pads, *, period_cyc, address, clk_stretch=False, data_bytes=1):
 
         self.pads          = pads
         self.period_cyc    = period_cyc
@@ -46,13 +46,15 @@ class I2CDeviceInterface(Elaboratable):
 
         self.busy          = Signal()
         self.address       = Signal(8)
+        self.size          = Signal(range(data_bytes+1))
         self.done          = Signal()
 
         self.read_request  = Signal()
-        self.read_data     = Signal(8)
+        self.read_data     = Signal(8 * data_bytes)
 
         self.write_request = Signal()
-        self.write_data    = Signal(8)
+        self.write_data    = Signal(8 * data_bytes)
+
 
 
     def elaborate(self, platform):
@@ -60,6 +62,8 @@ class I2CDeviceInterface(Elaboratable):
 
         current_address = Signal.like(self.address)
         current_write   = Signal.like(self.write_data)
+        current_read    = Signal.like(self.read_data - 8)
+        rem_bytes       = Signal.like(self.size)
 
         # I2C initiator (low level manager) and default signal values
         m.submodules.i2c = i2c = I2CInitiator(pads=self.pads, period_cyc=self.period_cyc, clk_stretch=self.clk_stretch)
@@ -68,8 +72,6 @@ class I2CDeviceInterface(Elaboratable):
             i2c.write .eq(0),
             i2c.read  .eq(0),
             i2c.stop  .eq(0),
-
-            self.read_data.eq(i2c.data_o),
         ]
 
         with m.FSM() as fsm:
@@ -81,10 +83,13 @@ class I2CDeviceInterface(Elaboratable):
             with m.State('IDLE'):
                 with m.If(self.read_request):
                     m.d.sync += current_address.eq(self.address)
+                    m.d.sync += current_read.eq(0)
+                    m.d.sync += rem_bytes.eq(self.size)
                     m.next = 'RD_START'
                 with m.If(self.write_request):
                     m.d.sync += current_address.eq(self.address)
                     m.d.sync += current_write.eq(self.write_data)
+                    m.d.sync += rem_bytes.eq(self.size)
                     m.next = 'WR_START'
 
             # Write handling.
@@ -116,20 +121,29 @@ class I2CDeviceInterface(Elaboratable):
             with m.State("WR_ACK_REG_ADDRESS"):
                 with m.If(~i2c.busy):
                     with m.If(i2c.ack_o):  # reg address asserted
-                        m.next = "WR_SEND_VALUE"
+                        with m.If(rem_bytes != 0):
+                            m.next = "WR_SEND_VALUE"
+                        with m.Else():
+                            m.next = "FINISH"  # 0-byte write
                     with m.Else():
                         m.next = "ABORT"
 
             with m.State("WR_SEND_VALUE"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.data_i.eq(current_write)
+                    m.d.comb += i2c.data_i.eq(current_write[-8:])
                     m.d.comb += i2c.write.eq(1)
+                    # prepare next byte too
+                    m.d.sync += current_write.eq(current_write << 8)
+                    m.d.sync += rem_bytes.eq(rem_bytes - 1)
                     m.next = "WR_ACK_VALUE"
             
             with m.State("WR_ACK_VALUE"):
                 with m.If(~i2c.busy):
                     with m.If(i2c.ack_o):
-                        m.next = "WR_FINISH"
+                        with m.If(rem_bytes != 0):
+                            m.next = "WR_SEND_VALUE"
+                        with m.Else():
+                            m.next = "FINISH"
                     with m.Else():
                         m.next = "ABORT"
 
@@ -171,7 +185,10 @@ class I2CDeviceInterface(Elaboratable):
             with m.State("RD0_ACK_REG_ADDRESS"):
                 with m.If(~i2c.busy):
                     with m.If(i2c.ack_o):  # reg address asserted
-                        m.next = "RD1_START"
+                        with m.If(rem_bytes != 0):
+                            m.next = "RD1_START"
+                        with m.Else():
+                            m.next = "FINISH"  # 0-byte read
                     with m.Else():
                         m.next = "ABORT"
             
@@ -195,16 +212,28 @@ class I2CDeviceInterface(Elaboratable):
 
             with m.State("RD1_RECV_VALUE"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.ack_i.eq(0)  # 0 in last read byte
+                    m.d.comb += i2c.ack_i.eq(~(rem_bytes == 1))  # 0 in last read byte
                     m.d.comb += i2c.read.eq(1)
-                    m.next = "RD1_FINISH"
+                    m.d.sync += rem_bytes.eq(rem_bytes - 1)
+                    m.next = "RD1_WAIT_VALUE"
 
-            with m.State("RD1_FINISH"):
+            with m.State("RD1_WAIT_VALUE"):
+                with m.If(~i2c.busy):
+                    m.d.sync += current_read.eq((current_read << 8) | i2c.data_o)
+                    with m.If(rem_bytes != 0):
+                        m.next = "RD1_RECV_VALUE"
+                    with m.Else():
+                        m.d.sync += self.read_data.eq((current_read << 8) | i2c.data_o)
+                        m.next = "FINISH"
+
+            # Proper finish asserting "done"
+            with m.State("FINISH"):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.stop.eq(1)
                     m.d.comb += self.done.eq(1)
                     m.next = "IDLE"
             
+            # Aborting returns to IDLE after freeing the bus
             with m.State("ABORT"):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.stop.eq(1)
