@@ -158,7 +158,8 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
         self.add_i2c_registers(m, platform,
             i2c_bus="power_monitor",
             dev_address=0b0010000,  # PAC195X slave address when ADDRSEL tied to GND
-            register_base=REGISTER_PWR_MON_ADDR
+            register_base=REGISTER_PWR_MON_ADDR,
+            data_bytes=7
         )
 
         return m
@@ -210,22 +211,24 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
             output=ulpi_reg_window.write_request
         )
 
-    def add_i2c_registers(self, m, platform, *, i2c_bus, dev_address, register_base):
+    def add_i2c_registers(self, m, platform, *, i2c_bus, dev_address, register_base, data_bytes=1):
         """ Adds a set of I2C registers to the active design. """
 
-        target_i2c      = platform.request(i2c_bus)
-
-        i2c_if = I2CDeviceInterface(pads=target_i2c, period_cyc=300, address=dev_address)
-        m.submodules  += i2c_if
+        target_i2c = platform.request(i2c_bus)
+        i2c_if     = I2CDeviceInterface(pads=target_i2c, period_cyc=300, address=dev_address)
+        m.submodules += i2c_if
 
         register_address_change  = Signal()
         register_value_change    = Signal()
+
+        reg_size                 = Signal(8)
+        m.d.comb += i2c_if.size.eq(reg_size)
 
         # I2C register address.
         registers = m.submodules.registers
         registers.add_register(register_base + 0,
             write_strobe=register_address_change,
-            value_signal=i2c_if.address,
+            value_signal=Cat(reg_size, i2c_if.address),  # 16-bit value: (address << 8) | size
         )
         m.d.sync += i2c_if.read_request.eq(register_address_change)
 
@@ -340,21 +343,21 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
 
     @named_test("TARGET Type-C")
     def test_target_typec_controller(self, dut):
-        self.dut.registers.register_write(REGISTER_TARGET_TYPEC_CTL_ADDR, 0x01)
+        self.dut.registers.register_write(REGISTER_TARGET_TYPEC_CTL_ADDR, (0x01 << 8) | 1)
         actual_value = self.dut.registers.register_read(REGISTER_TARGET_TYPEC_CTL_VALUE)
         if actual_value & 0b11001100 != 0b10000000:
             raise AssertionError(f"TARGET Type-C ID device ID register was {bin(actual_value)}, not 0b10xx00xx")
 
     @named_test("AUX Type-C")
     def test_aux_typec_controller(self, dut):
-        self.dut.registers.register_write(REGISTER_AUX_TYPEC_CTL_ADDR, 0x01)
+        self.dut.registers.register_write(REGISTER_AUX_TYPEC_CTL_ADDR, (0x01 << 8) | 1)
         actual_value = self.dut.registers.register_read(REGISTER_AUX_TYPEC_CTL_VALUE)
         if actual_value & 0b11001100 != 0b10000000:
             raise AssertionError(f"TARGET Type-C ID device ID register was {bin(actual_value)}, not 0b10xx00xx")
 
     @named_test("Power monitor")
     def test_power_monitor_controller(self, dut):
-        self.dut.registers.register_write(REGISTER_PWR_MON_ADDR, 0xFE)
+        self.dut.registers.register_write(REGISTER_PWR_MON_ADDR, (0xFE << 8) | 1)
         actual_value = self.dut.registers.register_read(REGISTER_PWR_MON_VALUE)
         if actual_value != 0x54:
             raise AssertionError(f"Power Monitor manufacturer ID register 0x{actual_value:x} != 0x54")
