@@ -60,11 +60,11 @@ class I2CDeviceInterface(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        current_address = Signal.like(self.address)
-        current_write   = Signal.like(self.write_data)
-        current_read    = Signal.like(self.read_data - 8)
-        rem_bytes       = Signal.like(self.size)
-        is_write        = Signal()
+        current_address = Signal.like(self.address, reset_less=True)
+        current_write   = Signal.like(self.write_data, reset_less=True)
+        current_read    = Signal.like(self.read_data - 8, reset_less=True)
+        rem_bytes       = Signal.like(self.size, reset_less=True)
+        is_write        = Signal(reset_less=True)
 
         # I2C initiator (low level manager) and default signal values
         m.submodules.i2c = i2c = I2CInitiator(pads=self.pads, period_cyc=self.period_cyc, clk_stretch=self.clk_stretch)
