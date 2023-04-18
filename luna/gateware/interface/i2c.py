@@ -64,6 +64,7 @@ class I2CDeviceInterface(Elaboratable):
         current_write   = Signal.like(self.write_data)
         current_read    = Signal.like(self.read_data - 8)
         rem_bytes       = Signal.like(self.size)
+        is_write        = Signal()
 
         # I2C initiator (low level manager) and default signal values
         m.submodules.i2c = i2c = I2CInitiator(pads=self.pads, period_cyc=self.period_cyc, clk_stretch=self.clk_stretch)
@@ -81,162 +82,138 @@ class I2CDeviceInterface(Elaboratable):
 
             # IDLE: wait for a request to be made
             with m.State('IDLE'):
-                with m.If(self.read_request):
-                    m.d.sync += current_address.eq(self.address)
-                    m.d.sync += current_read.eq(0)
-                    m.d.sync += rem_bytes.eq(self.size)
-                    m.next = 'RD_START'
-                with m.If(self.write_request):
-                    m.d.sync += current_address.eq(self.address)
-                    m.d.sync += current_write.eq(self.write_data)
-                    m.d.sync += rem_bytes.eq(self.size)
-                    m.next = 'WR_START'
+                with m.If(self.read_request | self.write_request):
+                    m.d.sync += [
+                        current_address .eq(self.address),
+                        current_write   .eq(self.write_data),
+                        current_read    .eq(0),
+                        rem_bytes       .eq(self.size),
+                        is_write        .eq(self.write_request),
+                    ]
+                    m.next = 'START'
 
-            # Write handling.
-            
-            with m.State('WR_START'):
+            # Common device and register address handling
+            with m.State('START'):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.start.eq(1)
-                    m.next = 'WR_SEND_DEV_ADDRESS'
+                    m.next = 'SEND_DEV_ADDRESS'
 
-            with m.State("WR_SEND_DEV_ADDRESS"):
+            with m.State("SEND_DEV_ADDRESS"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.data_i.eq((self.dev_address << 1) | 0)
-                    m.d.comb += i2c.write.eq(1)
-                    m.next = "WR_ACK_DEV_ADDRESS"
+                    m.d.comb += [
+                        i2c.data_i.eq((self.dev_address << 1) | 0),
+                        i2c.write .eq(1),
+                    ]
+                    m.next = "ACK_DEV_ADDRESS"
 
-            with m.State("WR_ACK_DEV_ADDRESS"):
+            with m.State("ACK_DEV_ADDRESS"):
                 with m.If(~i2c.busy):
                     with m.If(i2c.ack_o):  # dev address asserted
-                        m.next = "WR_SEND_REG_ADDRESS"
+                        m.next = "SEND_REG_ADDRESS"
                     with m.Else():
                         m.next = "ABORT"
 
-            with m.State("WR_SEND_REG_ADDRESS"):
+            with m.State("SEND_REG_ADDRESS"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.data_i.eq(current_address)
-                    m.d.comb += i2c.write.eq(1)
-                    m.next = "WR_ACK_REG_ADDRESS"
+                    m.d.comb += [
+                        i2c.data_i.eq(current_address),
+                        i2c.write .eq(1),
+                    ]
+                    m.next = "ACK_REG_ADDRESS"
 
-            with m.State("WR_ACK_REG_ADDRESS"):
+            with m.State("ACK_REG_ADDRESS"):
                 with m.If(~i2c.busy):
-                    with m.If(i2c.ack_o):  # reg address asserted
-                        with m.If(rem_bytes != 0):
-                            m.next = "WR_SEND_VALUE"
-                        with m.Else():
-                            m.next = "FINISH"  # 0-byte write
+                    with m.If(~i2c.ack_o):
+                        m.next = "ABORT"   # register address not asserted
+                    with m.Elif(rem_bytes == 0):
+                        m.next = "FINISH"  # 0-byte read/write
+                    with m.Elif(is_write):
+                        m.next = "WR_SEND_VALUE"
                     with m.Else():
-                        m.next = "ABORT"
+                        m.next = "RD_START"
+
+            # Write states
+            # These handle the transmission of the successive bytes in the 
+            # current write request
 
             with m.State("WR_SEND_VALUE"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.data_i.eq(current_write[-8:])
-                    m.d.comb += i2c.write.eq(1)
+                    m.d.comb += [
+                        i2c.data_i.eq(current_write[-8:]),
+                        i2c.write .eq(1),
+                    ]
                     # prepare next byte too
-                    m.d.sync += current_write.eq(current_write << 8)
-                    m.d.sync += rem_bytes.eq(rem_bytes - 1)
+                    m.d.sync += [
+                        current_write.eq(current_write << 8),
+                        rem_bytes    .eq(rem_bytes - 1),
+                    ]
                     m.next = "WR_ACK_VALUE"
             
             with m.State("WR_ACK_VALUE"):
                 with m.If(~i2c.busy):
-                    with m.If(i2c.ack_o):
-                        with m.If(rem_bytes != 0):
-                            m.next = "WR_SEND_VALUE"
-                        with m.Else():
-                            m.next = "FINISH"
-                    with m.Else():
+                    with m.If(~i2c.ack_o):
                         m.next = "ABORT"
+                    with m.Elif(rem_bytes == 0):
+                        m.next = "FINISH"
+                    with m.Else():
+                        m.next = "WR_SEND_VALUE"
 
-            with m.State("WR_FINISH"):
-                with m.If(~i2c.busy):
-                    m.d.comb += i2c.stop.eq(1)
-                    m.d.comb += self.done.eq(1)
-                    m.next = "IDLE"
-
-            # Read handling.
-            # Read is actually divided into two phases:
-            # - First phase (RD0) performs a write with the register address
-            # - Second phase (RD1) performs the actual read
+            # Read states
+            # Once the source register address is written in the common states,
+            # the following handles the retrieval of bytes from the device with
+            # a new I2C read request.
 
             with m.State('RD_START'):
                 with m.If(~i2c.busy):
                     m.d.comb += i2c.start.eq(1)
-                    m.next = 'RD0_SEND_DEV_ADDRESS'
+                    m.next = 'RD_SEND_DEV_ADDRESS'
 
-            with m.State("RD0_SEND_DEV_ADDRESS"):
+            with m.State("RD_SEND_DEV_ADDRESS"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.data_i.eq((self.dev_address << 1) | 0)
-                    m.d.comb += i2c.write.eq(1)
-                    m.next = "RD0_ACK_DEV_ADDRESS"
+                    m.d.comb += [
+                        i2c.data_i.eq((self.dev_address << 1) | 1),
+                        i2c.write .eq(1),
+                    ]
+                    m.next = "RD_ACK_DEV_ADDRESS"
 
-            with m.State("RD0_ACK_DEV_ADDRESS"):
+            with m.State("RD_ACK_DEV_ADDRESS"):
                 with m.If(~i2c.busy):
                     with m.If(i2c.ack_o):  # dev address asserted
-                        m.next = "RD0_SEND_REG_ADDRESS"
+                        m.next = "RD_RECV_VALUE"
                     with m.Else():
                         m.next = "ABORT"
 
-            with m.State("RD0_SEND_REG_ADDRESS"):
+            with m.State("RD_RECV_VALUE"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.data_i.eq(current_address)
-                    m.d.comb += i2c.write.eq(1)
-                    m.next = "RD0_ACK_REG_ADDRESS"
-
-            with m.State("RD0_ACK_REG_ADDRESS"):
-                with m.If(~i2c.busy):
-                    with m.If(i2c.ack_o):  # reg address asserted
-                        with m.If(rem_bytes != 0):
-                            m.next = "RD1_START"
-                        with m.Else():
-                            m.next = "FINISH"  # 0-byte read
-                    with m.Else():
-                        m.next = "ABORT"
-            
-            with m.State('RD1_START'):
-                with m.If(~i2c.busy):
-                    m.d.comb += i2c.start.eq(1)
-                    m.next = 'RD1_SEND_DEV_ADDRESS'
-
-            with m.State("RD1_SEND_DEV_ADDRESS"):
-                with m.If(~i2c.busy):
-                    m.d.comb += i2c.data_i.eq((self.dev_address << 1) | 1)
-                    m.d.comb += i2c.write.eq(1)
-                    m.next = "RD1_ACK_DEV_ADDRESS"
-
-            with m.State("RD1_ACK_DEV_ADDRESS"):
-                with m.If(~i2c.busy):
-                    with m.If(i2c.ack_o):  # dev address asserted
-                        m.next = "RD1_RECV_VALUE"
-                    with m.Else():
-                        m.next = "ABORT"
-
-            with m.State("RD1_RECV_VALUE"):
-                with m.If(~i2c.busy):
-                    m.d.comb += i2c.ack_i.eq(~(rem_bytes == 1))  # 0 in last read byte
-                    m.d.comb += i2c.read.eq(1)
+                    m.d.comb += [
+                        i2c.ack_i.eq(~(rem_bytes == 1)),  # 0 in last read byte
+                        i2c.read .eq(1),
+                    ]
                     m.d.sync += rem_bytes.eq(rem_bytes - 1)
-                    m.next = "RD1_WAIT_VALUE"
+                    m.next = "RD_WAIT_VALUE"
 
-            with m.State("RD1_WAIT_VALUE"):
+            with m.State("RD_WAIT_VALUE"):
                 with m.If(~i2c.busy):
                     m.d.sync += current_read.eq((current_read << 8) | i2c.data_o)
-                    with m.If(rem_bytes != 0):
-                        m.next = "RD1_RECV_VALUE"
-                    with m.Else():
+                    with m.If(rem_bytes == 0):
                         m.d.sync += self.read_data.eq((current_read << 8) | i2c.data_o)
                         m.next = "FINISH"
+                    with m.Else():
+                        m.next = "RD_RECV_VALUE"
 
-            # Proper finish asserting "done"
+            # Common "exit" states that return to idle
+            # FINISH asserts "done" to tell the transfer was done successfully
             with m.State("FINISH"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.stop.eq(1)
-                    m.d.comb += self.done.eq(1)
+                    m.d.comb += [
+                        i2c.stop .eq(1),
+                        self.done.eq(1),
+                    ]
                     m.next = "IDLE"
             
-            # Aborting returns to IDLE after freeing the bus
             with m.State("ABORT"):
                 with m.If(~i2c.busy):
-                    m.d.comb += i2c.stop.eq(1)
+                    m.d.comb += i2c.stop .eq(1)
                     m.next = "IDLE"
 
         return m
