@@ -20,7 +20,8 @@ from .cynthion_r0_3 import CynthionPlatformRev0D3
 from .cynthion_r0_4 import CynthionPlatformRev0D4
 from .cynthion_r1 import CynthionPlatformRev1
 from .daisho    import DaishoPlatform
-from .amalthea  import AmaltheaPlatformRev0D1
+from .amalthea_r0_1  import AmaltheaPlatformRev0D1
+from .amalthea_r0_2  import AmaltheaPlatformRev0D2
 
 from .core      import NullPin
 
