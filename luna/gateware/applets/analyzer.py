@@ -28,7 +28,6 @@ from luna.gateware.usb.request.control import ControlRequestHandler
 from luna.gateware.usb.stream          import USBInStreamInterface
 from luna.gateware.stream.generator    import StreamSerializer
 from luna.gateware.utils.cdc           import synchronize
-from luna.gateware.architecture.car    import LunaECP5DomainGenerator
 
 from luna.gateware.interface.ulpi      import UTMITranslator
 from luna.gateware.usb.analyzer        import USBAnalyzer
@@ -131,6 +130,10 @@ class USBAnalyzerApplet(Elaboratable):
         - DRAM backing for analysis
     """
 
+    def __init__(self, generate_clocks=True):
+        self.generate_clocks = generate_clocks
+
+
     def create_descriptors(self):
         """ Create the descriptors we want to use for our device. """
 
@@ -174,9 +177,9 @@ class USBAnalyzerApplet(Elaboratable):
         # State register
         m.submodules.state = state = USBAnalyzerState()
 
-        # Generate our clock domains.
-        clocking = LunaECP5DomainGenerator()
-        m.submodules.clocking = clocking
+        # Generate our clock domains if needed.
+        if self.generate_clocks:
+            m.submodules.clocking = platform.clock_domain_generator()
 
         # Create our UTMI translator.
         ulpi = platform.request("target_phy")
