@@ -17,7 +17,7 @@ from luna.gateware.architecture.car   import LunaECP5DomainGenerator
 from luna.gateware.interface.jtag     import JTAGRegisterInterface
 from luna.gateware.interface.ulpi     import ULPIRegisterWindow
 from luna.gateware.interface.psram    import HyperRAMInterface
-from luna.gateware.interface.i2c      import I2CDeviceInterface
+from luna.gateware.interface.i2c      import I2CRegisterInterface
 
 from apollo_fpga.support.selftest     import ApolloSelfTestCase, named_test
 
@@ -215,7 +215,7 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
         """ Adds a set of I2C registers to the active design. """
 
         target_i2c = platform.request(i2c_bus)
-        i2c_if     = I2CDeviceInterface(pads=target_i2c, period_cyc=300, address=dev_address)
+        i2c_if     = I2CRegisterInterface(pads=target_i2c, period_cyc=300, address=dev_address)
         m.submodules += i2c_if
 
         register_address_change  = Signal()
