@@ -109,15 +109,15 @@ class CynthionPlatformRev0D7(LUNAApolloPlatform, LatticeECP5Platform):
         ULPIResource("control_phy", 0,
             data="N16 N14 P16 P15 R16 R15 T15 P14", clk="L14", clk_dir='o',
             dir="M16", nxt="M15", stp="L15", rst="L16", rst_invert=True,
-            attrs=Attrs(IO_TYPE="LVCMOS33", SLEWRATE="FAST")),
+            attrs=Attrs(IO_TYPE="LVCMOS33", SLEWRATE="FAST", DRIVE="4")),
         ULPIResource("aux_phy", 0,
             data="J16 K15 K16 J13 J14 H13 H14 K14", clk="F16", clk_dir='o',
             dir="H15", nxt="J15", stp="G16", rst="G15", rst_invert=True,
-            attrs=Attrs(IO_TYPE="LVCMOS33", SLEWRATE="FAST")),
+            attrs=Attrs(IO_TYPE="LVCMOS33", SLEWRATE="FAST", DRIVE="4")),
         ULPIResource("target_phy", 0,
             data="R2 R1 P2 P1 N3 N1 M2 M1", clk="T4", clk_dir='o',
             dir="R3", nxt="T2", stp="T3", rst="R4", rst_invert=True,
-            attrs=Attrs(IO_TYPE="LVCMOS33", SLEWRATE="FAST")),
+            attrs=Attrs(IO_TYPE="LVCMOS33", SLEWRATE="FAST", DRIVE="4")),
 
         # direct connection to TARGET USB D+/D-
         Resource("target_usb_diff", 0, DiffPairs("N4", "P3", dir="i"), Attrs(IO_TYPE="LVDS", PULLMODE="NONE")),
