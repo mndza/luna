@@ -212,17 +212,22 @@ class LFSR(Elaboratable):
         m = Module()
 
         reg = Signal(self.width, reset=self.init)
-
-        # Compute indices of reg to be XORed for producing the output bits
-        # and the next reg state
+        
+        # Represent internal state as sets of indices to XOR.
+        # Use the `xor_ids` helper to get each final bit value.
         reg_ids = [ {n} for n in range(len(reg)) ]
+        xor_ids = lambda ids: Cat(reg[n] for n in ids).xor()
+
+        # We need to advance the LFSR per output bit. Keep track of them.
+        out_bits = []
         for i in range(len(self.output)):
-            outbit = Cat(reg[n] for n in reg_ids[0]).xor()
-            m.d.comb += self.output[len(self.output)-1-i].eq(outbit)  # msb first
+            out_bits.append(xor_ids(reg_ids[0]))
             reg_ids = galois_advance_reg(reg_ids, taps=self.taps)
 
+        # Finally, drive output and next state signals
+        m.d.comb += self.output.eq(Cat(out_bits[::-1]))  # msb first
         for i in range(len(reg)):
-            m.d.usb += reg[i].eq(Cat(reg[n] for n in reg_ids[i]).xor())
+            m.d.usb += reg[i].eq(xor_ids(reg_ids[i]))
 
         return m
 
