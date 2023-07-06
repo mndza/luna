@@ -222,7 +222,7 @@ class LFSR(Elaboratable):
         out_bits = []
         for i in range(len(self.output)):
             out_bits.append(xor_ids(reg_ids[0]))
-            reg_ids = galois_advance_reg(reg_ids, taps=self.taps)
+            reg_ids = fibonacci_advance_reg(reg_ids, taps=self.taps)
 
         # Finally, drive output and next state signals
         m.d.comb += self.output.eq(Cat(out_bits[::-1]))  # msb first
@@ -231,12 +231,12 @@ class LFSR(Elaboratable):
 
         return m
 
-# Galois LFSR
-# https://en.wikipedia.org/wiki/Linear-feedback_shift_register#Galois_LFSRs
-def galois_advance_reg(reg, taps):
-    new_reg = [ set() for _ in range(len(reg)) ]
-    new_reg[-1] = reg[0]
-    for n in range(len(reg)-1):
-        if len(reg)-1-n in taps: new_reg[n] = reg[n+1] ^ reg[0]
-        else:                    new_reg[n] = reg[n+1]
+from functools import reduce
+from operator  import xor
+
+# Fibonacci LFSR
+# https://en.wikipedia.org/wiki/Linear-feedback_shift_register#Fibonacci_LFSRs
+def fibonacci_advance_reg(reg, taps=[7,5,3,0]):
+    feedback = reduce(xor, [reg[i] for i in taps] )
+    new_reg = reg[1:] + [feedback]
     return new_reg
