@@ -86,19 +86,16 @@ class USBInSpeedTestDevice(Elaboratable):
         )
         usb.add_endpoint(stream_ep)
 
-        # Create a simple, monotonically-increasing data stream, and connect that up to
-        # to our streaming endpoint.
-        counter   = Signal(16)
+        # Create a pseudo-random sequence with a LFSR that only advances whenever
+        # our endpoint is accepting data.
+        lfsr = EnableInserter(stream_ep.stream.ready)(LFSR(output_width=8))
+        m.submodules.lfsr = lfsr
 
         # Send entirely zeroes, as fast as we can.
         m.d.comb += [
             stream_ep.stream.valid    .eq(1),
-            stream_ep.stream.payload  .eq(counter),
+            stream_ep.stream.payload  .eq(lfsr.output),
         ]
-
-        # Increment our counter whenever our endpoint is accepting data.
-        with m.If(stream_ep.stream.ready):
-            m.d.usb += counter.eq(counter + 1)
 
         # Connect our device as a high speed device by default.
         m.d.comb += [
@@ -202,3 +199,39 @@ class USBInSuperSpeedTestDevice(Elaboratable):
 
         # Return our elaborated module.
         return m
+
+
+class LFSR(Elaboratable):
+    def __init__(self, taps=0xA9, init=0xFF, len=8, output_width=1):
+        self.width  = len
+        self.taps   = [ i for i in range(taps.bit_length()) if taps & (1 << i) ]
+        self.init   = init
+        self.output = Signal(output_width)
+
+    def elaborate(self, platform):
+        m = Module()
+
+        reg = Signal(self.width, reset=self.init)
+
+        # Compute indices of reg to be XORed for producing the output bits
+        # and the next reg state
+        reg_ids = [ {n} for n in range(len(reg)) ]
+        for i in range(len(self.output)):
+            outbit = Cat(reg[n] for n in reg_ids[0]).xor()
+            m.d.comb += self.output[len(self.output)-1-i].eq(outbit)  # msb first
+            reg_ids = galois_advance_reg(reg_ids, taps=self.taps)
+
+        for i in range(len(reg)):
+            m.d.usb += reg[i].eq(Cat(reg[n] for n in reg_ids[i]).xor())
+
+        return m
+
+# Galois LFSR
+# https://en.wikipedia.org/wiki/Linear-feedback_shift_register#Galois_LFSRs
+def galois_advance_reg(reg, taps):
+    new_reg = [ set() for _ in range(len(reg)) ]
+    new_reg[-1] = reg[0]
+    for n in range(len(reg)-1):
+        if len(reg)-1-n in taps: new_reg[n] = reg[n+1] ^ reg[0]
+        else:                    new_reg[n] = reg[n+1]
+    return new_reg
