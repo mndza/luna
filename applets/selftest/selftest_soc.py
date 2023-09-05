@@ -46,7 +46,7 @@ class LEDPeripheral(Peripheral, Elaboratable):
         m.submodules.bridge = self._bridge
 
         # Grab our LEDS...
-        leds = Cat(platform.request("led", i) for i in range(6))
+        leds = Cat(platform.request("led", i).o for i in range(6))
 
         # ... and update them on each register write.
         with m.If(self._output.w_stb):
@@ -250,8 +250,8 @@ class SelftestCore(Elaboratable):
         # ... and connect up its UART.
         uart_io  = platform.request("uart", 0)
         m.d.comb += [
-            uart_io.tx         .eq(self.uart.tx),
-            self.uart.rx       .eq(uart_io.rx),
+            uart_io.tx.o       .eq(self.uart.tx),
+            self.uart.rx       .eq(uart_io.rx.i),
         ]
 
         if hasattr(uart_io.tx, 'oe'):

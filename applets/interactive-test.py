@@ -100,7 +100,7 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
 
         # LED test register.
         led_reg = registers.add_register(REGISTER_LEDS, size=6, name="leds", reset=0b111111)
-        led_out   = Cat([platform.request("led", i, dir="o") for i in range(0, 6)])
+        led_out   = Cat([platform.request("led", i, dir="o").o for i in range(0, 6)])
         m.d.comb += led_out.eq(led_reg)
 
         #
@@ -125,8 +125,8 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
             m.d.sync += power_test_reg[0:2].eq(power_test_write_value)
 
         # Decode the enable bits and control the two power supplies.
-        power_a_port      = platform.request("power_a_port")
-        power_passthrough = platform.request("pass_through_vbus")
+        power_a_port      = platform.request("power_a_port").o
+        power_passthrough = platform.request("pass_through_vbus").o
         with m.If(power_test_reg[0:2] == 1):
             m.d.comb += [
                 power_a_port       .eq(1),
@@ -198,7 +198,7 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
 
         # Hook up our PSRAM.
         m.d.comb += [
-            ram_bus.reset          .eq(0),
+            ram_bus.reset.o        .eq(0),
             psram.single_page      .eq(0),
             psram.perform_write    .eq(0),
             psram.register_space   .eq(1),
@@ -223,9 +223,9 @@ class InteractiveSelftest(Elaboratable, ApolloSelfTestCase):
             ulpi_reg_window.ulpi_dir      .eq(target_ulpi.dir.i),
             ulpi_reg_window.ulpi_next     .eq(target_ulpi.nxt.i),
 
-            target_ulpi.clk      .eq(ClockSignal("usb")),
-            target_ulpi.rst      .eq(ResetSignal("usb")),
-            target_ulpi.stp      .eq(ulpi_reg_window.ulpi_stop),
+            target_ulpi.clk.o    .eq(ClockSignal("usb")),
+            target_ulpi.rst.o    .eq(ResetSignal("usb")),
+            target_ulpi.stp.o    .eq(ulpi_reg_window.ulpi_stop),
             target_ulpi.data.o   .eq(ulpi_reg_window.ulpi_data_out),
             target_ulpi.data.oe  .eq(~target_ulpi.dir.i)
         ]

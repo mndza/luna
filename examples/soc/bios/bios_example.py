@@ -41,7 +41,7 @@ class LEDPeripheral(Peripheral, Elaboratable):
         m.submodules.bridge = self._bridge
 
         # Grab our LEDS...
-        leds = Cat(platform.request("led", i) for i in range(6))
+        leds = Cat(platform.request("led", i).o for i in range(6))
 
         # ... and update them on each register write.
         with m.If(self._output.w_stb):
@@ -80,8 +80,8 @@ class LunaCPUExample(Elaboratable):
         # Connect up our UART.
         uart_io = platform.request("uart", 0)
         m.d.comb += [
-            uart_io.tx.o       .eq(self.uart_pins.tx),
-            self.uart_pins.rx  .eq(uart_io.rx)
+            uart_io.tx.o        .eq(self.uart_pins.tx.o),
+            self.uart_pins.rx.i .eq(uart_io.rx.i)
         ]
 
         if hasattr(uart_io.tx, 'oe'):
