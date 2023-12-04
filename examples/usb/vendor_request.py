@@ -20,6 +20,9 @@ class LEDRequestHandler(USBRequestHandler):
 
     REQUEST_SET_LEDS = 0
 
+    def handled(self, setup):
+        return (setup.type == USBRequestType.VENDOR) & (setup.request == self.REQUEST_SET_LEDS)
+
     def elaborate(self, platform):
         m = Module()
 
@@ -56,16 +59,7 @@ class LEDRequestHandler(USBRequestHandler):
                     with m.If(interface.status_requested):
                         m.d.comb += self.send_zlp()
 
-
-                with m.Case():
-
-                    #
-                    # Stall unhandled requests.
-                    #
-                    with m.If(interface.status_requested | interface.data_requested):
-                        m.d.comb += interface.handshakes_out.stall.eq(1)
-
-                return m
+        return m
 
 
 

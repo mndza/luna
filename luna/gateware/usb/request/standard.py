@@ -55,6 +55,8 @@ class StandardRequestHandler(ControlRequestHandler):
 
         super().__init__()
 
+    def handled(self, setup):
+        return setup.type == USBRequestType.STANDARD
 
     def elaborate(self, platform):
         m = Module()

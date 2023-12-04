@@ -101,6 +101,8 @@ class USBRequestHandler(Elaboratable):
         #
         self.interface = RequestHandlerInterface()
 
+    def handled(self, setup):
+        raise NotImplementedError("Please define `handled` for all registered request handlers.")
 
     def send_zlp(self):
         """ Returns the statements necessary to send a zero-length packet."""

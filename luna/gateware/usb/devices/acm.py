@@ -29,6 +29,9 @@ class ACMRequestHandlers(USBRequestHandler):
 
     SET_LINE_CODING = 0x20
 
+    def handled(self, setup):
+        return (setup.type == USBRequestType.CLASS) & (setup.request == self.SET_LINE_CODING)
+
     def elaborate(self, platform):
         m = Module()
 
@@ -40,30 +43,19 @@ class ACMRequestHandlers(USBRequestHandler):
         #
 
         with m.If(setup.type == USBRequestType.CLASS):
-            with m.Switch(setup.request):
+            # SET_LINE_CODING: The host attempts to tell us how it wants serial data
+            # encoding. Since we output a stream, we'll ignore the actual line coding.
+            with m.If(setup.request == self.SET_LINE_CODING):
 
-                # SET_LINE_CODING: The host attempts to tell us how it wants serial data
-                # encoding. Since we output a stream, we'll ignore the actual line coding.
-                with m.Case(self.SET_LINE_CODING):
+                # Always ACK the data out...
+                with m.If(interface.rx_ready_for_response):
+                    m.d.comb += interface.handshakes_out.ack.eq(1)
 
-                    # Always ACK the data out...
-                    with m.If(interface.rx_ready_for_response):
-                        m.d.comb += interface.handshakes_out.ack.eq(1)
+                # ... and accept whatever the request was.
+                with m.If(interface.status_requested):
+                    m.d.comb += self.send_zlp()
 
-                    # ... and accept whatever the request was.
-                    with m.If(interface.status_requested):
-                        m.d.comb += self.send_zlp()
-
-
-                with m.Case():
-
-                    #
-                    # Stall unhandled requests.
-                    #
-                    with m.If(interface.status_requested | interface.data_requested):
-                        m.d.comb += interface.handshakes_out.stall.eq(1)
-
-                return m
+        return m
 
 
 class USBSerialDevice(Elaboratable):

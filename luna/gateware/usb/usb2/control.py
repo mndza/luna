@@ -6,6 +6,8 @@
 """ Low-level USB transciever gateware -- control transfer components. """
 
 import unittest
+import operator
+from functools             import reduce
 
 from amaranth              import Signal, Module, Elaboratable
 from usb_protocol.emitters import DeviceDescriptorCollection
@@ -128,18 +130,15 @@ class USBControlEndpoint(Elaboratable):
 
 
         #
-        # Convenience feature:
+        # We know if a setup packet is processed with the handled() method from the request handlers.
         #
-        # If we have -only- a standard request handler, automatically add a handler that will
-        # stall all other requests.
-        #
-        single_handler = (len(self._request_handlers) == 1)
-        if (single_handler and isinstance(self._request_handlers[0], StandardRequestHandler)):
-
-            # Add a handler that will stall any non-standard request.
-            stall_condition = lambda setup : setup.type != USBRequestType.STANDARD
-            self.add_request_handler(StallOnlyRequestHandler(stall_condition))
-
+        if len(self._request_handlers) > 0:
+            # Emit a stall when the request is not taken care of by the registered request handlers
+            handle_conditions = [handler.handled for handler in self._request_handlers]
+            stall_condition = lambda setup: reduce(operator.and_, (~cond(setup) for cond in handle_conditions))
+        else:
+            stall_condition = lambda setup: True
+        self.add_request_handler(StallOnlyRequestHandler(stall_condition))
 
         #
         # Submodules
