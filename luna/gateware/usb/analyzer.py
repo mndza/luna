@@ -52,8 +52,8 @@ class USBAnalyzer(Elaboratable):
         Must be a power of 2.
     """
 
-    # Current, we'll provide a packet header of 16 bits.
-    HEADER_SIZE_BITS = 16
+    # Header is 16-bit length and 16-bit timestamp.
+    HEADER_SIZE_BITS = 32
     HEADER_SIZE_BYTES = HEADER_SIZE_BITS // 8
 
     # Support a maximum payload size of 1024B, plus a 1-byte PID and a 2-byte CRC16.
@@ -77,7 +77,7 @@ class USBAnalyzer(Elaboratable):
         #
         # I/O port
         #
-        self.stream         = StreamInterface(payload_width=16)
+        self.stream         = StreamInterface()
 
         self.capture_enable = Signal()
         self.idle           = Signal()
@@ -115,6 +115,7 @@ class USBAnalyzer(Elaboratable):
 
         # Current receive status.
         packet_size     = Signal(16)
+        packet_time     = Signal(16)
 
         # Triggers for memory write operations.
         write_packet    = Signal()
@@ -123,20 +124,45 @@ class USBAnalyzer(Elaboratable):
         empty           = Signal()
         m.d.comb       += empty.eq(fifo_count == 0)
 
-
+        #
         # Output FIFO
         # Used to transfer data between the HyperRAM and the output stream
+        #
         out_fifo = ResetInserter(self.discarding)(
             AsyncFIFO(width=16, depth=self.mem_depth, r_domain="usb", w_domain="sync"))
         m.submodules.out_fifo = out_fifo
 
         m.d.comb += [
-            self.stream.payload .eq(Cat(out_fifo.r_data[8:16], out_fifo.r_data[0:8])),
-            self.stream.valid   .eq(out_fifo.r_rdy),
-            out_fifo.r_en       .eq(self.stream.ready),
-
             self.sampling       .eq(write_header | write_packet),
         ]
+    
+        #
+        # Convert to 8-bit stream
+        #
+        # Flag to tell if we need to take a new word from the FIFO.
+        byte_odd = Signal()
+        # We'll put each word to be sent through an shift register
+        # that shifts out words a byte at a time.
+        data_shift = Signal.like(out_fifo.r_data)
+        # Always provide our inner transmitter with the least byte of our shift register.
+        m.d.comb += self.stream.payload.eq(data_shift[0:8])
+
+        with m.If(~self.stream.valid | self.stream.ready):
+
+            with m.If(byte_odd):
+                m.d.usb += [
+                    data_shift .eq(data_shift[8:]),
+                    byte_odd   .eq(0),
+                ]
+            with m.Else():
+                m.d.comb += out_fifo.r_en    .eq(1)
+                m.d.usb += self.stream.valid .eq(out_fifo.r_rdy)
+                with m.If(out_fifo.r_rdy):
+                    m.d.usb += [
+                        data_shift .eq(Cat(out_fifo.r_data[8:16], out_fifo.r_data[0:8])),
+                        byte_odd   .eq(1),
+                    ]
+
 
         if use_hyperram:
 
@@ -278,7 +304,11 @@ class USBAnalyzer(Elaboratable):
                 m.d.sync += fifo_count.eq(fifo_count - data_popped + data_pending + data_pending[0])  # force alignment
             with m.Else():
                 m.d.sync += fifo_count.eq(fifo_count - data_popped)
-            
+
+        # Timestamp counter.
+        current_time = Signal(16)
+        m.d.usb += current_time.eq(current_time + 1)
+
         #
         # Core analysis FSM.
         #
@@ -295,6 +325,7 @@ class USBAnalyzer(Elaboratable):
             with m.State("AWAIT_START"):
                 with m.If(self.capture_enable & ~self.utmi.rx_active):
                     m.next = "AWAIT_PACKET"
+                    m.d.usb += current_time.eq(0)
 
 
             # AWAIT_PACKET: capture is enabled, wait for a packet to start.
@@ -307,6 +338,8 @@ class USBAnalyzer(Elaboratable):
                         header_location  .eq((write_location + write_odd)[1:]),
                         write_location   .eq(write_location + write_odd + self.HEADER_SIZE_BYTES),
                         packet_size      .eq(0),
+                        packet_time      .eq(current_time),
+                        current_time     .eq(0),
                     ]
                     m.d.sync += [
                         data_pending     .eq(self.HEADER_SIZE_BYTES),
@@ -382,10 +415,18 @@ class USBAnalyzer(Elaboratable):
                         mem_write_port.addr  .eq(header_location),
                         mem_write_port.data  .eq(packet_size),
                         mem_write_port.en    .eq(0b11),
-                        #
                         data_commit          .eq(1),
                     ]
-                    m.next = "IDLE"
+                    m.next = "FINISH_HEADER"
+
+            # FINISH_HEADER: Write second word of header.
+            with m.State("FINISH_HEADER"):
+                m.d.comb += [
+                    mem_write_port.addr  .eq(header_location + 1),
+                    mem_write_port.data  .eq(packet_time),
+                    mem_write_port.en    .eq(0b11),
+                ]
+                m.next = "START"
 
             # IDLE: Nothing to do this cycle.
             with m.State("IDLE"):
