@@ -8,8 +8,10 @@
 
 import unittest
 
-from amaranth          import Signal, Module, Elaboratable, Memory, Record, Mux, Cat, ResetInserter
-from amaranth.lib.fifo import AsyncFIFO
+from amaranth          import Signal, Module, Elaboratable, Memory, Record, Mux, Cat, ResetInserter, C, DomainRenamer
+from enum              import IntEnum
+
+from amaranth.lib.fifo import AsyncFIFO, SyncFIFO
 
 from ..stream          import StreamInterface
 from ..test            import LunaGatewareTestCase, usb_domain_test_case
@@ -50,16 +52,21 @@ class USBAnalyzer(Elaboratable):
     mem_depth: int, default=8192
         The depth of the analyzer's local ringbuffer, in bytes.
         Must be a power of 2.
+    hyperram_buffer: bool, default=True
+        Enable the use of the HyperRAM ring buffer at the output stage.
     """
 
     # Header is 16-bit length and 16-bit timestamp.
     HEADER_SIZE_BITS = 32
-    HEADER_SIZE_BYTES = HEADER_SIZE_BITS // 8
+    HEADER_SIZE_WORDS = HEADER_SIZE_BITS // 16
+
+    # An event is a 16-bit code starting 0xFF, and a 16-bit timestamp.
+    EVENT_SIZE_WORDS = 2
 
     # Support a maximum payload size of 1024B, plus a 1-byte PID and a 2-byte CRC16.
     MAX_PACKET_SIZE_BYTES = 1024 + 1 + 2
 
-    def __init__(self, *, utmi_interface, mem_depth=4096):
+    def __init__(self, *, utmi_interface, mem_depth=4096, with_hyperram=True):
         """
         Parameters:
             utmi_interface -- A record or elaboratable that presents a UTMI interface.
@@ -67,12 +74,12 @@ class USBAnalyzer(Elaboratable):
 
         self.utmi = utmi_interface
         self.mem_depth = mem_depth
+        self.with_hyperram = with_hyperram
 
         assert (mem_depth % 2) == 0, "mem_depth must be a power of 2"
 
-        # Internal storage memory.
-        self.mem = Memory(width=16, depth=mem_depth, name="analysis_ringbuffer")
-        self.mem_size = 2 * mem_depth
+        # Internal work memory.
+        self.mem = Memory(width=16, depth=mem_depth, name="analysis_workbuffer")
 
         #
         # I/O port
@@ -93,7 +100,7 @@ class USBAnalyzer(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        use_hyperram = True
+        use_hyperram = self.with_hyperram
 
         # Memory read and write ports.
         m.submodules.read  = mem_read_port  = self.mem.read_port(domain="sync")
@@ -101,207 +108,97 @@ class USBAnalyzer(Elaboratable):
 
         # Store the memory address of our active packet header, which will store
         # packet metadata like the packet size.
-        header_location = Signal.like(mem_write_port.addr, reset_less=True)
-        write_location  = Signal(range(self.mem_size))
-
+        write_location  = Signal.like(mem_write_port.addr)
+        header_location = Signal.like(write_location, reset_less=True)
+        event_location  = Signal.like(write_location)
+        
         # Read FIFO status.
         read_location   = Signal.like(mem_read_port.addr)
-        fifo_count      = Signal(range(self.mem_size), reset=0)
+        fifo_count      = Signal.like(mem_read_port.addr)
 
-        # Memory addresses point to words
-        write_pointer   = Signal.like(mem_write_port.addr)
+        # Since write addresses point to words, we define a helper signal that 
+        # refers to bytes. This simplifies some of the logic later.
         write_odd       = Signal()
-        m.d.comb       += Cat(write_odd, write_pointer).eq(write_location)
+        write_byte_loc  = Cat(write_odd, write_location)
 
         # Current receive status.
         packet_size     = Signal(16)
         packet_time     = Signal(16)
+        event_code      = Signal(8)
 
         # Triggers for memory write operations.
         write_packet    = Signal()
         write_header    = Signal()
-
-        empty           = Signal()
-        m.d.comb       += empty.eq(fifo_count == 0)
-
-        #
-        # Output FIFO
-        # Used to transfer data between the HyperRAM and the output stream
-        #
-        out_fifo = ResetInserter(self.discarding)(
-            AsyncFIFO(width=16, depth=self.mem_depth, r_domain="usb", w_domain="sync"))
-        m.submodules.out_fifo = out_fifo
-
-        m.d.comb += [
-            self.sampling       .eq(write_header | write_packet),
-        ]
+        write_event     = Signal()
     
         #
-        # Convert to 8-bit stream
+        # Output stage blocks
+        # -> [ psram_fifo ] -> out_fifo -> stream_to_8
         #
-        # Flag to tell if we need to take a new word from the FIFO.
-        byte_odd = Signal()
-        # We'll put each word to be sent through an shift register
-        # that shifts out words a byte at a time.
-        data_shift = Signal.like(out_fifo.r_data)
-        # Always provide our inner transmitter with the least byte of our shift register.
-        m.d.comb += self.stream.payload.eq(data_shift[0:8])
-
-        with m.If(~self.stream.valid | self.stream.ready):
-
-            with m.If(byte_odd):
-                m.d.usb += [
-                    data_shift .eq(data_shift[8:]),
-                    byte_odd   .eq(0),
-                ]
-            with m.Else():
-                m.d.comb += out_fifo.r_en    .eq(1)
-                m.d.usb += self.stream.valid .eq(out_fifo.r_rdy)
-                with m.If(out_fifo.r_rdy):
-                    m.d.usb += [
-                        data_shift .eq(Cat(out_fifo.r_data[8:16], out_fifo.r_data[0:8])),
-                        byte_odd   .eq(1),
-                    ]
-
-
-        if use_hyperram:
-
-            # HyperRAM submodules
-            ram_bus         = platform.request('ram')
-            psram_phy       = HyperRAMPHY(bus=ram_bus)
-            psram           = HyperRAMInterface(phy=psram_phy.phy)
-            m.submodules   += [psram_phy, psram]
+        stream_to_8 = DomainRenamer("usb")(Stream16to8())
+        # Output FIFO
+        out_fifo    = StreamFIFO(ResetInserter(self.discarding)(
+            AsyncFIFO(width=16, depth=self.mem_depth, r_domain="usb", w_domain="sync")))
+        # Add submodules
+        m.submodules += [stream_to_8, out_fifo]
         
-            # HyperRAM status
-            psram_depth         = 2 ** 22
-            psram_write_pointer = Signal(range(psram_depth))
-            psram_read_pointer  = Signal(range(psram_depth))
-            psram_count         = Signal(range(psram_depth + 1))
-            psram_empty         = Signal()
-            psram_full          = Signal()
-            m.d.comb += [
-                psram_empty .eq(psram_count == 0),
-                psram_full  .eq(psram_count == psram_depth),
-            ]
-
-            # Update word count and pointers using the write and read strobes.
-            m.d.sync += psram_count.eq(psram_count - psram.read_ready + psram.write_ready)
-            with m.If(psram.read_ready):
-                m.d.sync += psram_read_pointer.eq(psram_read_pointer + 1)
-            with m.If(psram.write_ready):
-                m.d.sync += psram_write_pointer.eq(psram_write_pointer + 1)
-
-            # Hook up our PSRAM.
-            m.d.comb += [
-                ram_bus.reset.o        .eq(0),
-                psram.single_page      .eq(0),
-                psram.register_space   .eq(0),
-                psram.write_data       .eq(mem_read_port.data),
-            ]
-
-            # State machine to trigger HyperRAM write/read linear bursts.
-            # Writes have higher priority than reads to avoid data loss.
-            # Write to HyperRAM as long as there's incoming data and available space.
-            # Read from HyperRAM if there's data in it and the output FIFO has room left.
-            with m.FSM(domain="sync") as fsm:
-                with m.State("IDLE"):
-                    with m.If(~empty & ~psram_full):
-                        m.d.comb += [
-                            psram.address           .eq(psram_write_pointer),
-                            psram.perform_write     .eq(1),
-                            psram.start_transfer    .eq(1),
-                        ]
-                        m.next = "WRITE"
-                    with m.Elif(out_fifo.w_rdy & ~psram_empty):
-                        m.d.comb += [
-                            psram.address           .eq(psram_read_pointer),
-                            psram.perform_write     .eq(0),
-                            psram.start_transfer    .eq(1),
-                        ]
-                        m.next = "READ"
-                with m.State("WRITE"):
-                    m.d.comb += [
-                        psram.final_word .eq((psram_count == (psram_depth-1)) | 
-                                             (fifo_count == 2)),
-                    ]
-                    with m.If(psram.idle):
-                        m.next = "IDLE"
-                with m.State("READ"):
-                    m.d.comb += [
-                        psram.final_word .eq((psram_count == 1 + psram.read_ready) | 
-                                             (out_fifo.w_level == (out_fifo.depth - 2))),
-                    ]
-                    with m.If(psram.idle):
-                        m.next = "IDLE"
-                
-            # If discarding data, reset HyperRAM status.
-            with m.If(self.discarding):
-                m.d.sync += [
-                    psram_write_pointer .eq(0),
-                    psram_read_pointer  .eq(0),
-                    psram_count         .eq(0),
-                ]
-
-            # Hook output FIFO to HyperRAM and advance work memory pointer with
-            # the HyperRAM write strobe.
-            read_advance  = psram.write_ready
-            out_fifo_data = psram.read_data
-            out_fifo_en   = psram.read_ready
-
+        if use_hyperram:
+            psram_fifo    = ResetInserter(self.discarding)(HyperRAMPacketFIFO())
+            m.submodules += [psram_fifo]
+            m.d.comb     += out_fifo.input.stream_eq(psram_fifo.output)
+            stream        = psram_fifo.input
         else:
+            stream        = out_fifo.input
+        
+        m.d.comb += [
+            # Hook the output of the analyzer work buffer to the stream pipeline
+            stream.payload      .eq(mem_read_port.data),
+            stream.valid        .eq(fifo_count != 0),
+            stream.last         .eq(fifo_count == 1),
 
-            # Skip HyperRAM: hook output FIFO with work memory
-            read_advance  = out_fifo.w_en & out_fifo.w_rdy
-            out_fifo_data = mem_read_port.data
-            out_fifo_en   = fifo_count != 0
-
+            # Connect the rest of the blocks
+            stream_to_8.input   .stream_eq(out_fifo.output),
+            self.stream         .stream_eq(stream_to_8.output),
+        ]
+        
 
         # Once our consumer has accepted our current data, move to the next address.
-        with m.If(read_advance):
+        with m.If(stream.valid & stream.ready):
             m.d.sync += read_location      .eq(read_location + 1)
             m.d.comb += mem_read_port.addr .eq(read_location + 1)
         with m.Else():
             m.d.comb += mem_read_port.addr .eq(read_location)
 
-        # Wire data origin for the output FIFO
-        m.d.comb += [
-            out_fifo.w_data .eq(out_fifo_data),
-            out_fifo.w_en   .eq(out_fifo_en),
-        ]
-
-
-
-
         #
         # FIFO count handling.
         #
-        fifo_full = (fifo_count == self.mem_size)
+        fifo_full = (fifo_count == self.mem_depth)
 
-        # Number of bytes popped from the FIFO this cycle.
-        data_popped = Signal(2)
+        # Number of words popped from the FIFO this cycle.
+        data_popped = Signal()
 
-        # Number of uncommitted bytes and its push trigger.
-        data_pending = Signal(12)
+        # Number of uncommitted words and its push trigger.
+        data_pending = Signal(10)
         data_commit  = Signal()
 
         # One 16-bit word is popped if the stream is read.
-        with m.If(read_advance):
-            m.d.comb += data_popped.eq(2)
+        m.d.comb += data_popped.eq(stream.valid & stream.ready)
 
         # If discarding data, set the count to zero.
         with m.If(self.discarding):
             m.d.usb += [
-                write_location.eq(0),
+                write_byte_loc .eq(0),
+                event_location .eq(0),
             ]
             m.d.sync += [
-                fifo_count.eq(0),
-                data_pending.eq(0),
-                read_location.eq(0),
+                fifo_count     .eq(0),
+                data_pending   .eq(0),
+                read_location  .eq(0),
             ]
         # Otherwise, update the count acording to bytes pushed and popped.
         with m.Else():
             with m.If(data_commit):
-                m.d.sync += fifo_count.eq(fifo_count - data_popped + data_pending + data_pending[0])  # force alignment
+                m.d.sync += fifo_count.eq(fifo_count - data_popped + data_pending)
             with m.Else():
                 m.d.sync += fifo_count.eq(fifo_count - data_popped)
 
@@ -319,6 +216,7 @@ class USBAnalyzer(Elaboratable):
                 self.overrun   .eq(f.ongoing("OVERRUN")),
                 self.capturing .eq(f.ongoing("CAPTURE_PACKET")),
                 self.discarding.eq(self.stopped & self.capture_enable),
+                self.sampling  .eq(write_header | write_packet | write_event),
             ]
 
             # AWAIT_START: wait for capture to be enabled, but don't start mid-packet.
@@ -335,14 +233,26 @@ class USBAnalyzer(Elaboratable):
                 with m.Elif(self.utmi.rx_active):
                     m.next = "CAPTURE_PACKET"
                     m.d.usb += [
-                        header_location  .eq((write_location + write_odd)[1:]),
-                        write_location   .eq(write_location + write_odd + self.HEADER_SIZE_BYTES),
+                        header_location  .eq(event_location),
+                        write_byte_loc   .eq(Cat(0, event_location + self.HEADER_SIZE_WORDS)),
                         packet_size      .eq(0),
                         packet_time      .eq(current_time),
                         current_time     .eq(0),
                     ]
                     m.d.sync += [
-                        data_pending     .eq(self.HEADER_SIZE_BYTES),
+                        data_pending     .eq(self.HEADER_SIZE_WORDS),
+                    ]
+                with m.Elif(current_time == 0xFFFF):
+                    # The timestamp is about to wrap. Write a dummy event.
+                    m.d.comb += [
+                        write_event      .eq(1),
+                        event_code       .eq(USBAnalyzerEvent.NONE),
+                    ]
+                    m.d.usb += [
+                        event_location   .eq(event_location + self.EVENT_SIZE_WORDS),
+                    ]
+                    m.d.sync += [
+                        data_pending     .eq(self.EVENT_SIZE_WORDS),
                     ]
 
 
@@ -359,13 +269,14 @@ class USBAnalyzer(Elaboratable):
                 # Advance the write pointer each time we receive a bit.
                 with m.If(byte_received):
                     m.d.usb += [
-                        write_location  .eq(write_location + 1),
-                        packet_size     .eq(packet_size + 1),
+                        write_byte_loc   .eq(write_byte_loc + 1),
+                        event_location   .eq(write_location + 1),
+                        packet_size      .eq(packet_size + 1),
                     ]
 
                     # If this would be filling up our data memory,
                     # move to the OVERRUN state.
-                    with m.If(fifo_count + data_pending == self.mem_size - 1):
+                    with m.If(fifo_count + data_pending == self.mem_depth - 1):
                         m.next = "OVERRUN"
 
                 # If we've stopped receiving, write header.
@@ -398,15 +309,23 @@ class USBAnalyzer(Elaboratable):
         with m.FSM(domain="sync"):
             # START: Begin write operation when requested.
             with m.State("START"):
-                with m.If(write_packet):
+                with m.If(write_event):
+                    # Write event identifier and event code.
+                    m.d.comb += [
+                        mem_write_port.addr  .eq(event_location),
+                        mem_write_port.data  .eq(Cat([event_code, C(0xFF, 8)])),
+                        mem_write_port.en    .eq(0b11),
+                    ]
+                    m.next = "FINISH_EVENT"
+                with m.Elif(write_packet):
                     # Write packet byte.
                     m.d.comb += [
-                        mem_write_port.addr  .eq(write_pointer),
+                        mem_write_port.addr  .eq(write_location),
                         mem_write_port.data  .eq(self.utmi.rx_data.replicate(2)),
                         mem_write_port.en    .eq(Mux(write_odd, 0b01, 0b10)),
                     ]
                     m.d.sync += [
-                        data_pending         .eq(data_pending + 1)
+                        data_pending         .eq(data_pending + ~write_odd)
                     ]
                     m.next = "IDLE"
                 with m.Elif(write_header):
@@ -415,7 +334,6 @@ class USBAnalyzer(Elaboratable):
                         mem_write_port.addr  .eq(header_location),
                         mem_write_port.data  .eq(packet_size),
                         mem_write_port.en    .eq(0b11),
-                        data_commit          .eq(1),
                     ]
                     m.next = "FINISH_HEADER"
 
@@ -425,9 +343,20 @@ class USBAnalyzer(Elaboratable):
                     mem_write_port.addr  .eq(header_location + 1),
                     mem_write_port.data  .eq(packet_time),
                     mem_write_port.en    .eq(0b11),
+                    data_commit          .eq(1),
                 ]
                 m.next = "START"
 
+            # FINISH_EVENT: Write second word of event.
+            with m.State("FINISH_EVENT"):
+                m.d.comb += [
+                    mem_write_port.addr  .eq(event_location + 1),
+                    mem_write_port.data  .eq(current_time),
+                    mem_write_port.en    .eq(0b11),
+                    data_commit          .eq(1),
+                ]
+                m.next = "START"
+            
             # IDLE: Nothing to do this cycle.
             with m.State("IDLE"):
                 m.next = "START"
@@ -436,6 +365,180 @@ class USBAnalyzer(Elaboratable):
         return m
 
 
+class USBAnalyzerEvent(IntEnum):
+    NONE = 0
+
+
+class StreamFIFO(Elaboratable):
+    def __init__(self, fifo):
+        self.fifo   = fifo
+        self.input  = StreamInterface(payload_width=fifo.width)
+        self.output = StreamInterface(payload_width=fifo.width)
+
+    def elaborate(self, platform):
+        m = Module()
+
+        m.submodules.fifo = self.fifo
+
+        m.d.comb += [
+            self.fifo.w_data    .eq(self.input.payload),
+            self.fifo.w_en      .eq(self.input.valid),
+            self.input.ready    .eq(self.fifo.w_rdy),
+
+            self.output.payload .eq(self.fifo.r_data),
+            self.output.valid   .eq(self.fifo.r_rdy),
+            self.fifo.r_en      .eq(self.output.ready),
+        ]
+
+        return m
+
+
+class HyperRAMPacketFIFO(Elaboratable):
+    def __init__(self):
+        self.input  = StreamInterface(payload_width=16)
+        self.output = StreamInterface(payload_width=16)
+
+    def elaborate(self, platform):
+        m = Module()
+
+        # HyperRAM submodules
+        ram_bus         = platform.request('ram')
+        psram_phy       = HyperRAMPHY(bus=ram_bus)
+        psram           = HyperRAMInterface(phy=psram_phy.phy)
+        m.submodules   += [psram_phy, psram]
+    
+        # HyperRAM status
+        depth         = 2 ** 22
+        write_address = Signal(range(depth))
+        read_address  = Signal(range(depth))
+        word_count    = Signal(range(depth + 1))
+        empty         = Signal()
+        full          = Signal()
+        m.d.comb += [
+            empty .eq(word_count == 0),
+            full  .eq(word_count == depth),
+        ]
+
+        # Update word count and pointers using the write and read strobes.
+        m.d.sync += word_count.eq(word_count - psram.read_ready + psram.write_ready)
+        with m.If(psram.read_ready):
+            m.d.sync += read_address.eq(read_address + 1)
+        with m.If(psram.write_ready):
+            m.d.sync += write_address.eq(write_address + 1)
+
+        # This tiny output buffer prevents data loss during consumer stalls
+        m.submodules.out_fifo = out_fifo = SyncFIFO(width=16, depth=2)
+
+        # Hook up our PSRAM.
+        m.d.comb += [
+            ram_bus.reset.o       .eq(0),
+            psram.single_page     .eq(0),
+            psram.register_space  .eq(0),
+            psram.write_data      .eq(self.input.payload),
+            self.input.ready      .eq(psram.write_ready),
+
+            # Wire PSRAM -> output FIFO -> output stream
+            out_fifo.w_data       .eq(psram.read_data),
+            out_fifo.w_en         .eq(psram.read_ready),
+            self.output.payload   .eq(out_fifo.r_data),
+            self.output.valid     .eq(out_fifo.r_rdy),
+            out_fifo.r_en         .eq(self.output.ready),
+        ]
+
+        #
+        # HyperRAM Packet FIFO state machine
+        #
+        with m.FSM(domain="sync"):
+
+            # IDLE: Begin a write / read burst operation when ready.
+            with m.State("IDLE"):
+                with m.If(self.input.valid & ~full):
+                    m.d.comb += [
+                        psram.address           .eq(write_address),
+                        psram.perform_write     .eq(1),
+                        psram.start_transfer    .eq(1),
+                        psram.final_word        .eq(self.input.last),
+                    ]
+                    with m.If(psram.final_word):
+                        m.next = "FINISH"
+                    with m.Else():
+                        m.next = "WRITE"
+
+                with m.Elif((out_fifo.level == 0) & ~empty):
+                    m.d.comb += [
+                        psram.address           .eq(read_address),
+                        psram.perform_write     .eq(0),
+                        psram.start_transfer    .eq(1),
+                        psram.final_word        .eq(word_count == 1),
+                    ]
+                    with m.If(psram.final_word):
+                        m.next = "FINISH"
+                    with m.Else():
+                        m.next = "READ"
+
+            # WRITE: End the operation when there's no space or incoming data.
+            with m.State("WRITE"):
+                m.d.comb += [
+                    psram.final_word.eq((word_count == (depth-1)) | self.input.last),
+                ]
+                with m.If(psram.final_word):
+                    m.next = "FINISH"
+
+            # READ: End the operation when PSRAM is empty or the consumer stalls the output stream.
+            with m.State("READ"):
+                m.d.comb += [
+                    psram.final_word.eq((word_count == 1 + psram.read_ready) | ~self.output.ready),
+                ]
+                with m.If(psram.final_word):
+                    m.next = "FINISH"
+
+            # FINISH: Wait for the PSRAM to recover before a new transaction
+            with m.State("FINISH"):
+                with m.If(psram.idle):
+                    m.next = "IDLE"
+
+        return m
+
+
+class Stream16to8(Elaboratable):
+    def __init__(self, msb_first=True):
+        self.msb_first = msb_first
+        self.input     = StreamInterface(payload_width=16)
+        self.output    = StreamInterface(payload_width=8)
+
+    def elaborate(self, platform):
+        m = Module()
+
+        input_data = self.input.payload
+        if self.msb_first:
+            input_data = Cat(input_data[8:16], input_data[0:8])            
+
+        odd_byte   = Signal()
+        data_shift = Signal.like(self.input.payload)  # shift register
+        m.d.comb  += self.output.payload.eq(data_shift[0:8])
+
+        # When the output stream is not stalled...
+        with m.If(self.output.ready | ~self.output.valid):
+
+            # If odd_byte is asserted, send the buffered second byte
+            with m.If(odd_byte):
+                m.d.sync += [
+                    data_shift          .eq(data_shift[8:]),
+                    self.output.valid   .eq(1),
+                    odd_byte            .eq(0),
+                ]
+
+            # Otherwise, consume a new word from the input stream
+            with m.Else():    
+                m.d.comb += self.input.ready .eq(1)
+                m.d.sync += self.output.valid.eq(self.input.valid)
+                with m.If(self.input.valid):
+                    m.d.sync += [
+                        data_shift .eq(input_data),
+                        odd_byte   .eq(1),
+                    ]
+
+        return m
 
 class USBAnalyzerTest(LunaGatewareTestCase):
 
