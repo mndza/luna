@@ -124,6 +124,7 @@ class LunaDomainGenerator(Elaboratable, metaclass=ABCMeta):
         self.clk_fast     = Signal()
         self.clk_sync     = Signal()
         self.clk_usb      = Signal()
+        self.clk_hyperram = Signal()
 
         self.usb_holdoff  = Signal()
 
@@ -168,6 +169,7 @@ class LunaDomainGenerator(Elaboratable, metaclass=ABCMeta):
         m.domains.fast = self.fast = ClockDomain()
         m.domains.sync = self.sync = ClockDomain()
         m.domains.usb  = self.usb  = ClockDomain()
+        m.domains.hyperram  = self.hyperram  = ClockDomain()
 
         # Call the hook that will create any submodules necessary for all clocks.
         self.create_submodules(m, platform)
@@ -177,10 +179,12 @@ class LunaDomainGenerator(Elaboratable, metaclass=ABCMeta):
             self.clk_usb                   .eq(self.generate_usb_clock(m, platform)),
             self.clk_sync                  .eq(self.generate_sync_clock(m, platform)),
             self.clk_fast                  .eq(self.generate_fast_clock(m, platform)),
+            self.clk_hyperram                  .eq(self.generate_hyperram_clock(m, platform)),
 
             ClockSignal(domain="fast")     .eq(self.clk_fast),
             ClockSignal(domain="sync")     .eq(self.clk_sync),
             ClockSignal(domain="usb")      .eq(self.clk_usb),
+            ClockSignal(domain="hyperram")      .eq(self.clk_usb),
         ]
 
         # Call the hook that will connect up our reset signals.
@@ -202,7 +206,8 @@ class LunaECP5DomainGenerator(LunaDomainGenerator):
     DEFAULT_CLOCK_FREQUENCIES_MHZ = {
         "fast": 240,
         "sync": 120,
-        "usb":  60
+        "usb":  60,
+        "hyperram": 160,
     }
 
     def __init__(self, *, clock_frequencies=None, clock_signal_name=None, clock_signal_frequency=None):
@@ -242,10 +247,12 @@ class LunaECP5DomainGenerator(LunaDomainGenerator):
         self._clk_240MHz = Signal()
         self._clk_120MHz = Signal()
         self._clk_60MHz  = Signal()
+        self._clk_160MHz = Signal()
         self._clock_options = {
             60:  self._clk_60MHz,
             120: self._clk_120MHz,
-            240: self._clk_240MHz
+            240: self._clk_240MHz,
+            160: self._clk_160MHz,
         }
 
         pll_params = {}
@@ -283,6 +290,7 @@ class LunaECP5DomainGenerator(LunaDomainGenerator):
                 o_CLKOP=self._clk_240MHz,
                 o_CLKOS=self._clk_120MHz,
                 o_CLKOS2=self._clk_60MHz,
+                o_CLKOS3=self._clk_160MHz,
 
                 # Status.
                 o_LOCK=self._pll_lock,
@@ -306,14 +314,14 @@ class LunaECP5DomainGenerator(LunaDomainGenerator):
                 p_CLKOP_TRIM_DELAY="0",
                 p_CLKOP_TRIM_POL="FALLING",
                 p_OUTDIVIDER_MUXD="DIVD",
-                p_CLKOS3_ENABLE="DISABLED",
+                p_CLKOS3_ENABLE="ENABLED",
                 p_OUTDIVIDER_MUXC="DIVC",
                 p_CLKOS2_ENABLE="ENABLED",
                 p_OUTDIVIDER_MUXB="DIVB",
                 p_CLKOS_ENABLE="ENABLED",
                 p_OUTDIVIDER_MUXA="DIVA",
                 p_CLKOP_ENABLE="ENABLED",
-                p_CLKOS3_DIV=1,
+                p_CLKOS3_DIV=3,
                 p_CLKOS2_DIV=8,
                 p_CLKOS_DIV=4,
                 p_CLKOP_DIV=2,
@@ -343,6 +351,7 @@ class LunaECP5DomainGenerator(LunaDomainGenerator):
                 # Synthesis attributes.
                 a_FREQUENCY_PIN_CLKI="60.000000",
                 a_FREQUENCY_PIN_CLKOS2="60.000000",
+                a_FREQUENCY_PIN_CLKOS3="160.000000",
                 a_FREQUENCY_PIN_CLKOS="120.000000",
                 a_FREQUENCY_PIN_CLKOP="240.000000",
                 a_ICP_CURRENT="9",
@@ -356,6 +365,7 @@ class LunaECP5DomainGenerator(LunaDomainGenerator):
         m.d.comb += [
             ResetSignal("sync").eq(~self._pll_lock),
             ResetSignal("fast").eq(~self._pll_lock),
+            ResetSignal("hyperram").eq(~self._pll_lock),
         ]
 
 
@@ -368,6 +378,8 @@ class LunaECP5DomainGenerator(LunaDomainGenerator):
     def generate_fast_clock(self, m, platform):
         return self._clock_options[self.clock_frequencies['fast']]
 
+    def generate_hyperram_clock(self, m, platform):
+        return self._clock_options[self.clock_frequencies['hyperram']]
 
     def stretch_sync_strobe_to_usb(self, m, strobe, output=None, allow_delay=False):
         """
